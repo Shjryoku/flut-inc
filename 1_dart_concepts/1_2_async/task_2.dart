@@ -13,7 +13,7 @@ class Server {
     final Random random = Random();
 
     while (true) {
-      _controller = StreamController();
+      _controller = StreamController<int>.broadcast();
       _timer = Timer.periodic(Duration(seconds: 1), (timer) {
         _controller?.add(timer.tick);
       });
@@ -52,12 +52,72 @@ class Server {
 class DisconnectedException implements Exception {}
 
 class Client {
+  bool _connected = false;
+  bool _connecting = false;
+
+  final Duration initDelay;
+  final Duration maxDelay;
+  final int maxRetries;
+  final double multiplier;
+  final bool useJitter;
+
+  Client({
+    this.initDelay = const Duration(milliseconds: 500),
+    this.maxDelay = const Duration(seconds: 30),
+    this.maxRetries = 5,
+    this.multiplier = 2.0,
+    this.useJitter = true,
+  });
+
+  Future<void> _tryConnect(int attempt) async {
+    final factor = pow(multiplier, attempt - 1).toDouble();
+    var delay = Duration(milliseconds: (initDelay.inMilliseconds * factor).round());
+    if(delay > maxDelay) delay = maxDelay;
+    if(useJitter) delay = _applyJitter(delay);
+    await Future.delayed(delay);
+  }
+
+  Duration _applyJitter(Duration delay) {
+    final jitterFactor = Random().nextDouble();
+    return Duration(milliseconds: (delay.inMilliseconds * jitterFactor).round());
+  }
+
   Future<void> connect(Server server) async {
-    // TODO: Implement backoff re-connecting.
-    //       Data from the [server] should be printed to the console.
+    if(_connected || _connecting) return;
+    _connecting = true;
+
+    for(var attempt = 1; attempt <= maxRetries; attempt++){
+      try{
+        final stream = await server.connect();
+        print('Connected');
+        _connected = true;
+        _connecting = false;
+
+        stream.listen(
+          (event) => print('Connected, got: $event'),
+            onError: (err) async{
+              print('Disconnected. Reconnecting...');
+              _connected = false;
+              _connecting = false;
+              await connect(server);
+            },
+            cancelOnError: true,
+          );
+          return;
+      } catch(e){
+        _connecting = false;
+        _connected = false;
+        print('Connection failed: $e');
+        await _tryConnect(attempt);
+      }
+    }
+    print('Failed to connect after $maxRetries attempts');
+    _connecting = false;
   }
 }
 
 Future<void> main() async {
-  Client()..connect(Server()..init());
+  final server = Server();
+  unawaited(server.init());
+  await Client().connect(server);
 }
